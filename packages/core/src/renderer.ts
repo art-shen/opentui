@@ -52,20 +52,6 @@ registerEnvVar({
 })
 
 registerEnvVar({
-  name: "OTUI_USE_ALTERNATE_SCREEN",
-  description: "Use the terminal alternate screen buffer.",
-  type: "boolean",
-  default: true,
-})
-
-registerEnvVar({
-  name: "OTUI_OVERRIDE_STDOUT",
-  description: "Override the stdout stream. This is useful for debugging.",
-  type: "boolean",
-  default: true,
-})
-
-registerEnvVar({
   name: "OTUI_DEBUG",
   description: "Enable debug mode to capture all raw input for debugging purposes.",
   type: "boolean",
@@ -99,9 +85,10 @@ export interface CliRendererConfig {
   enableMouseMovement?: boolean
   useMouse?: boolean
   autoFocus?: boolean
-  useAlternateScreen?: boolean
-  useConsole?: boolean
-  experimental_splitHeight?: number
+  screenMode?: ScreenMode
+  footerHeight?: number
+  externalOutputMode?: ExternalOutputMode
+  consoleMode?: ConsoleMode
   useKittyKeyboard?: KittyKeyboardOptions | null
   backgroundColor?: ColorInput
   openConsoleOnError?: boolean
@@ -111,9 +98,34 @@ export interface CliRendererConfig {
   onDestroy?: () => void
 }
 
+export type ScreenMode = "alternate-screen" | "main-screen" | "split-footer"
+
+export type ExternalOutputMode = "capture-stdout" | "passthrough"
+
+export type ConsoleMode = "console-overlay" | "disabled"
+
 export type PixelResolution = {
   width: number
   height: number
+}
+
+const DEFAULT_FOOTER_HEIGHT = 12
+
+function normalizeFooterHeight(footerHeight: number | undefined): number {
+  if (footerHeight === undefined) {
+    return DEFAULT_FOOTER_HEIGHT
+  }
+
+  if (!Number.isFinite(footerHeight)) {
+    throw new Error("footerHeight must be a finite number")
+  }
+
+  const normalizedFooterHeight = Math.trunc(footerHeight)
+  if (normalizedFooterHeight <= 0) {
+    throw new Error("footerHeight must be greater than 0")
+  }
+
+  return normalizedFooterHeight
 }
 
 const DEFAULT_FORWARDED_ENV_KEYS = [
@@ -285,11 +297,19 @@ export async function createCliRenderer(config: CliRendererConfig = {}): Promise
   }
   const stdin = config.stdin || process.stdin
   const stdout = config.stdout || process.stdout
+  const screenMode = config.screenMode ?? "alternate-screen"
+  const footerHeight =
+    screenMode === "split-footer" ? normalizeFooterHeight(config.footerHeight) : DEFAULT_FOOTER_HEIGHT
+  const externalOutputMode =
+    config.externalOutputMode ?? (screenMode === "split-footer" ? "capture-stdout" : "passthrough")
+
+  if (externalOutputMode === "capture-stdout" && screenMode !== "split-footer") {
+    throw new Error('externalOutputMode "capture-stdout" requires screenMode "split-footer"')
+  }
 
   const width = stdout.columns || 80
   const height = stdout.rows || 24
-  const renderHeight =
-    config.experimental_splitHeight && config.experimental_splitHeight > 0 ? config.experimental_splitHeight : height
+  const renderHeight = screenMode === "split-footer" ? footerHeight : height
 
   const ziglib = resolveRenderLib()
   const rendererPtr = ziglib.createRenderer(width, renderHeight, {
@@ -428,7 +448,9 @@ export class CliRenderer extends EventEmitter implements RenderContext {
   private enableMouseMovement: boolean = false
   private _useMouse: boolean = true
   private autoFocus: boolean = true
-  private _useAlternateScreen: boolean = env.OTUI_USE_ALTERNATE_SCREEN
+  private _screenMode: ScreenMode = "alternate-screen"
+  private _footerHeight: number = DEFAULT_FOOTER_HEIGHT
+  private _externalOutputMode: ExternalOutputMode = "passthrough"
   private _suspendedMouseEnabled: boolean = false
   private _previousControlState: RendererControlState = RendererControlState.IDLE
   private capturedRenderable?: Renderable
@@ -552,14 +574,18 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this.width = width
     this.height = height
     this._useThread = config.useThread === undefined ? false : config.useThread
-    this._splitHeight = config.experimental_splitHeight || 0
+    const screenMode = config.screenMode ?? "alternate-screen"
+    const footerHeight =
+      screenMode === "split-footer" ? normalizeFooterHeight(config.footerHeight) : DEFAULT_FOOTER_HEIGHT
+    const externalOutputMode =
+      config.externalOutputMode ?? (screenMode === "split-footer" ? "capture-stdout" : "passthrough")
 
-    if (this._splitHeight > 0) {
-      capture.on("write", this.captureCallback)
-      this.renderOffset = height - this._splitHeight
-      this.height = this._splitHeight
-      lib.setRenderOffset(rendererPtr, this.renderOffset)
+    if (externalOutputMode === "capture-stdout" && screenMode !== "split-footer") {
+      throw new Error('externalOutputMode "capture-stdout" requires screenMode "split-footer"')
     }
+
+    this._footerHeight = footerHeight
+    this._screenMode = screenMode
 
     this.rendererPtr = rendererPtr
 
@@ -595,7 +621,6 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this.enableMouseMovement = config.enableMouseMovement ?? true
     this._useMouse = config.useMouse ?? true
     this.autoFocus = config.autoFocus ?? true
-    this._useAlternateScreen = config.useAlternateScreen ?? env.OTUI_USE_ALTERNATE_SCREEN
     this.nextRenderBuffer = this.lib.getNextBuffer(this.rendererPtr)
     this.currentRenderBuffer = this.lib.getCurrentBuffer(this.rendererPtr)
     this.postProcessFns = config.postProcessFns || []
@@ -605,10 +630,6 @@ export class CliRenderer extends EventEmitter implements RenderContext {
 
     if (this.memorySnapshotInterval > 0) {
       this.startMemorySnapshotTimer()
-    }
-
-    if (env.OTUI_OVERRIDE_STDOUT) {
-      this.stdout.write = this.interceptStdoutWrite.bind(this)
     }
 
     // Handle terminal resize
@@ -658,7 +679,9 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       ...(config.consoleOptions ?? {}),
       clock: this.clock,
     })
-    this.useConsole = config.useConsole ?? true
+    this.consoleMode = config.consoleMode ?? "console-overlay"
+    this.applyScreenMode(screenMode, false, false)
+    this.externalOutputMode = externalOutputMode
     this._openConsoleOnError = config.openConsoleOnError ?? process.env.NODE_ENV !== "production"
     this._onDestroy = config.onDestroy
 
@@ -836,13 +859,13 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this.resolveIdleIfNeeded()
   }
 
-  public get useConsole(): boolean {
-    return this._useConsole
+  public get consoleMode(): ConsoleMode {
+    return this._useConsole ? "console-overlay" : "disabled"
   }
 
-  public set useConsole(value: boolean) {
-    this._useConsole = value
-    if (value) {
+  public set consoleMode(mode: ConsoleMode) {
+    this._useConsole = mode === "console-overlay"
+    if (this._useConsole) {
       this.console.activate()
     } else {
       this.console.deactivate()
@@ -923,8 +946,45 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     }
   }
 
-  public get experimental_splitHeight(): number {
-    return this._splitHeight
+  public get screenMode(): ScreenMode {
+    return this._screenMode
+  }
+
+  public set screenMode(mode: ScreenMode) {
+    if (this.externalOutputMode === "capture-stdout" && mode !== "split-footer") {
+      throw new Error('externalOutputMode "capture-stdout" requires screenMode "split-footer"')
+    }
+
+    this.applyScreenMode(mode)
+  }
+
+  public get footerHeight(): number {
+    return this._footerHeight
+  }
+
+  public set footerHeight(footerHeight: number) {
+    const normalizedFooterHeight = normalizeFooterHeight(footerHeight)
+    if (normalizedFooterHeight === this._footerHeight) {
+      return
+    }
+
+    this._footerHeight = normalizedFooterHeight
+    if (this.screenMode === "split-footer") {
+      this.applyScreenMode("split-footer")
+    }
+  }
+
+  public get externalOutputMode(): ExternalOutputMode {
+    return this._externalOutputMode
+  }
+
+  public set externalOutputMode(mode: ExternalOutputMode) {
+    if (mode === "capture-stdout" && this.screenMode !== "split-footer") {
+      throw new Error('externalOutputMode "capture-stdout" requires screenMode "split-footer"')
+    }
+
+    this._externalOutputMode = mode
+    this.stdout.write = mode === "capture-stdout" ? this.interceptStdoutWrite : this.realStdoutWrite
   }
 
   public get liveRequestCount(): number {
@@ -956,55 +1016,6 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this.lib.setKittyKeyboardFlags(this.rendererPtr, flags)
   }
 
-  public set experimental_splitHeight(splitHeight: number) {
-    if (splitHeight < 0) splitHeight = 0
-
-    const prevSplitHeight = this._splitHeight
-
-    if (splitHeight > 0) {
-      this._splitHeight = splitHeight
-      this.renderOffset = this._terminalHeight - this._splitHeight
-      this.height = this._splitHeight
-
-      if (prevSplitHeight === 0) {
-        this.useConsole = false
-        capture.on("write", this.captureCallback)
-        const freedLines = this._terminalHeight - this._splitHeight
-        const scrollDown = ANSI.scrollDown(freedLines)
-        this.writeOut(scrollDown)
-      } else if (prevSplitHeight > this._splitHeight) {
-        const freedLines = prevSplitHeight - this._splitHeight
-        const scrollDown = ANSI.scrollDown(freedLines)
-        this.writeOut(scrollDown)
-      } else if (prevSplitHeight < this._splitHeight) {
-        const additionalLines = this._splitHeight - prevSplitHeight
-        const scrollUp = ANSI.scrollUp(additionalLines)
-        this.writeOut(scrollUp)
-      }
-    } else {
-      if (prevSplitHeight > 0) {
-        this.flushStdoutCache(this._terminalHeight, true)
-
-        capture.off("write", this.captureCallback)
-        this.useConsole = true
-      }
-
-      this._splitHeight = 0
-      this.renderOffset = 0
-      this.height = this._terminalHeight
-    }
-
-    this.width = this._terminalWidth
-    this.lib.setRenderOffset(this.rendererPtr, this.renderOffset)
-    this.lib.resizeRenderer(this.rendererPtr, this.width, this.height)
-    this.nextRenderBuffer = this.lib.getNextBuffer(this.rendererPtr)
-
-    this._console.resize(this.width, this.height)
-    this.root.resize(this.width, this.height)
-    this.emit(CliRenderEvents.RESIZE, this.width, this.height)
-    this.requestRender()
-  }
-
   private interceptStdoutWrite = (chunk: any, encoding?: any, callback?: any): boolean => {
     const text = chunk.toString()
 
@@ -1020,8 +1031,76 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     return true
   }
 
-  public disableStdoutInterception(): void {
-    this.stdout.write = this.realStdoutWrite
+  private applyScreenMode(screenMode: ScreenMode, emitResize: boolean = true, requestRender: boolean = true): void {
+    const prevScreenMode = this._screenMode
+    const prevSplitHeight = this._splitHeight
+    const nextSplitHeight = screenMode === "split-footer" ? this._footerHeight : 0
+
+    if (prevScreenMode === screenMode && prevSplitHeight === nextSplitHeight) {
+      return
+    }
+
+    const prevUseAlternateScreen = prevScreenMode === "alternate-screen"
+    const nextUseAlternateScreen = screenMode === "alternate-screen"
+    const terminalScreenModeChanged = this._terminalIsSetup && prevUseAlternateScreen !== nextUseAlternateScreen
+    const leavingSplitFooter = prevSplitHeight > 0 && nextSplitHeight === 0
+
+    if (this._terminalIsSetup && leavingSplitFooter) {
+      this.flushStdoutCache(this._terminalHeight, true)
+    }
+
+    if (this._terminalIsSetup && !terminalScreenModeChanged) {
+      if (prevSplitHeight === 0 && nextSplitHeight > 0) {
+        const freedLines = this._terminalHeight - nextSplitHeight
+        const scrollDown = ANSI.scrollDown(freedLines)
+        this.writeOut(scrollDown)
+      } else if (prevSplitHeight > nextSplitHeight && nextSplitHeight > 0) {
+        const freedLines = prevSplitHeight - nextSplitHeight
+        const scrollDown = ANSI.scrollDown(freedLines)
+        this.writeOut(scrollDown)
+      } else if (prevSplitHeight < nextSplitHeight && prevSplitHeight > 0) {
+        const additionalLines = nextSplitHeight - prevSplitHeight
+        const scrollUp = ANSI.scrollUp(additionalLines)
+        this.writeOut(scrollUp)
+      }
+    }
+
+    if (prevSplitHeight === 0 && nextSplitHeight > 0) {
+      capture.on("write", this.captureCallback)
+    } else if (prevSplitHeight > 0 && nextSplitHeight === 0) {
+      capture.off("write", this.captureCallback)
+    }
+
+    this._screenMode = screenMode
+    this._splitHeight = nextSplitHeight
+    this.renderOffset = nextSplitHeight > 0 ? this._terminalHeight - nextSplitHeight : 0
+    this.width = this._terminalWidth
+    this.height = nextSplitHeight > 0 ? nextSplitHeight : this._terminalHeight
+
+    this.lib.setRenderOffset(this.rendererPtr, this.renderOffset)
+    this.lib.resizeRenderer(this.rendererPtr, this.width, this.height)
+    this.nextRenderBuffer = this.lib.getNextBuffer(this.rendererPtr)
+    this.currentRenderBuffer = this.lib.getCurrentBuffer(this.rendererPtr)
+
+    this._console.resize(this.width, this.height)
+    this.root.resize(this.width, this.height)
+
+    if (terminalScreenModeChanged) {
+      this.lib.suspendRenderer(this.rendererPtr)
+      this.lib.setupTerminal(this.rendererPtr, nextUseAlternateScreen)
+
+      if (this._useMouse) {
+        this.enableMouse()
+      }
+    }
+
+    if (emitResize) {
+      this.emit(CliRenderEvents.RESIZE, this.width, this.height)
+    }
+
+    if (requestRender) {
+      this.requestRender()
+    }
   }
 
   // TODO: Move this to native
@@ -1093,7 +1172,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
       privateCapabilityRepliesActive: true,
       explicitWidthCprActive: true,
     })
-    this.lib.setupTerminal(this.rendererPtr, this._useAlternateScreen)
+    this.lib.setupTerminal(this.rendererPtr, this._screenMode === "alternate-screen")
     this._capabilities = this.lib.getTerminalCapabilities(this.rendererPtr)
 
     if (this.debugOverlay.enabled) {
@@ -2014,7 +2093,7 @@ export class CliRenderer extends EventEmitter implements RenderContext {
     this.stdinParser = null
     this.oscSubscribers.clear()
     this._console.destroy()
-    this.disableStdoutInterception()
+    this.externalOutputMode = "passthrough"
 
     if (this._splitHeight > 0) {
       this.flushStdoutCache(this._splitHeight, true)

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 
+import { capture } from "../console.ts"
 import { clearEnvCache } from "../lib/env.ts"
 import { createTestRenderer, type TestRenderer } from "../testing/test-renderer"
 import { ManualClock } from "../testing/manual-clock"
@@ -16,6 +17,7 @@ beforeEach(() => {
 afterEach(() => {
   renderer?.destroy()
   renderer = null
+  capture.claimOutput()
 
   if (previousShowConsole === undefined) {
     delete process.env.SHOW_CONSOLE
@@ -62,4 +64,61 @@ test("CliRenderer uses its shared clock for debounced resize", async () => {
 
   expect(renderer.width).toBe(70)
   expect(renderer.height).toBe(30)
+})
+
+test("CliRenderer applies explicit screen and output modes", async () => {
+  const result = await createTestRenderer({
+    screenMode: "split-footer",
+    footerHeight: 6,
+    externalOutputMode: "capture-stdout",
+    consoleMode: "disabled",
+  })
+
+  renderer = result.renderer
+
+  expect(renderer.screenMode).toBe("split-footer")
+  expect(renderer.footerHeight).toBe(6)
+  expect(renderer.externalOutputMode).toBe("capture-stdout")
+  expect(renderer.consoleMode).toBe("disabled")
+})
+
+test("CliRenderer rejects captured output outside split-footer mode", async () => {
+  await expect(
+    createTestRenderer({
+      screenMode: "main-screen",
+      externalOutputMode: "capture-stdout",
+    }),
+  ).rejects.toThrow('externalOutputMode "capture-stdout" requires screenMode "split-footer"')
+})
+
+test("CliRenderer flushes captured output when leaving split-footer for alternate-screen", async () => {
+  const writes: string[] = []
+  const result = await createTestRenderer({
+    screenMode: "split-footer",
+    footerHeight: 6,
+    externalOutputMode: "capture-stdout",
+    consoleMode: "disabled",
+    stdout: {
+      isTTY: true,
+      columns: 40,
+      rows: 20,
+      write: (chunk: string) => {
+        writes.push(String(chunk))
+        return true
+      },
+      getColorDepth: () => 24,
+    } as unknown as NodeJS.WriteStream,
+  })
+
+  renderer = result.renderer
+  ;(renderer as any)._terminalIsSetup = true
+  ;(renderer as any).lib.suspendRenderer = () => {}
+  ;(renderer as any).lib.setupTerminal = () => {}
+
+  capture.write("stdout", "pending output\n")
+  renderer.externalOutputMode = "passthrough"
+  renderer.screenMode = "alternate-screen"
+
+  expect(capture.size).toBe(0)
+  expect(writes.some((chunk) => chunk.includes("pending output\n"))).toBe(true)
 })
