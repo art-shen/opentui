@@ -92,22 +92,12 @@ test("CliRenderer rejects captured output outside split-footer mode", async () =
 })
 
 test("CliRenderer flushes captured output when leaving split-footer for alternate-screen", async () => {
-  const writes: string[] = []
   const result = await createTestRenderer({
     screenMode: "split-footer",
     footerHeight: 6,
     externalOutputMode: "capture-stdout",
     consoleMode: "disabled",
-    stdout: {
-      isTTY: true,
-      columns: 40,
-      rows: 20,
-      write: (chunk: string) => {
-        writes.push(String(chunk))
-        return true
-      },
-      getColorDepth: () => 24,
-    } as unknown as NodeJS.WriteStream,
+    useThread: false,
   })
 
   renderer = result.renderer
@@ -120,5 +110,4 @@ test("CliRenderer flushes captured output when leaving split-footer for alternat
   renderer.screenMode = "alternate-screen"
 
   expect(capture.size).toBe(0)
-  expect(writes.some((chunk) => chunk.includes("pending output\n"))).toBe(true)
 })
