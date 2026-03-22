@@ -39,14 +39,15 @@ import { StdinParser, type StdinEvent, type StdinParserProtocolContext } from ".
 
 registerEnvVar({
   name: "OTUI_DUMP_CAPTURES",
-  description: "Dump captured output when the renderer exits.",
+  description: "Dump captured stdout and console caches when the renderer exit handler runs.",
   type: "boolean",
   default: false,
 })
 
 registerEnvVar({
   name: "OTUI_NO_NATIVE_RENDER",
-  description: "Disable native rendering. This will not actually output ansi and is useful for debugging.",
+  description:
+    "Skip the Zig/native frame renderer. Useful for debugging the render loop; split-footer stdout flushing may still write ANSI.",
   type: "boolean",
   default: false,
 })
@@ -66,42 +67,121 @@ registerEnvVar({
 })
 
 export interface CliRendererConfig {
+  // Read input from this stream. Defaults to process.stdin.
   stdin?: NodeJS.ReadStream
+
+  // Use a custom stdout stream for size detection and stdout interception.
+  // Native frame output still goes to the real TTY.
   stdout?: NodeJS.WriteStream
+
+  // Tell the native renderer it is driving a remote terminal.
   remote?: boolean
+
+  // Skip terminal setup. Useful in tests.
   testing?: boolean
+
+  // Call renderer.destroy() when Ctrl+C is pressed. Defaults to true.
   exitOnCtrlC?: boolean
+
+  // Clean up on these signals. Defaults to the common termination signals.
   exitSignals?: NodeJS.Signals[]
+
+  // Forward these env var names to native terminal detection.
   forwardEnvKeys?: string[]
+
+  // Wait this long before handling resize events. Defaults to 100 ms.
   debounceDelay?: number
+
+  // Aim for this many frames per second in continuous mode. Defaults to 30.
   targetFps?: number
+
+  // Cap immediate re-renders at this frame rate. Defaults to 60.
   maxFps?: number
+
+  // Emit memory snapshots on this interval in ms. Set 0 to disable.
   memorySnapshotInterval?: number
+
+  // Render from a separate thread when the platform supports it.
   useThread?: boolean
+
+  // Collect frame timing stats for the debug overlay.
   gatherStats?: boolean
+
+  // Keep this many timing samples. Defaults to 300.
   maxStatSamples?: number
+
+  // Pass options to the built-in console overlay.
   consoleOptions?: Omit<ConsoleOptions, "clock">
+
+  // Run these hooks after each render pass.
   postProcessFns?: ((buffer: OptimizedBuffer, deltaTime: number) => void)[]
+
+  // Track mouse move events. Defaults to true.
   enableMouseMovement?: boolean
+
+  // Enable mouse input. Defaults to true.
   useMouse?: boolean
+
+  // Focus the nearest focusable renderable on left click. Defaults to true.
   autoFocus?: boolean
+
+  // Choose where the renderer owns terminal space. Defaults to "alternate-screen".
   screenMode?: ScreenMode
+
+  // Set the requested footer height for "split-footer". Defaults to 12.
   footerHeight?: number
+
+  // Choose what happens to writes that go through `stdout.write`.
   externalOutputMode?: ExternalOutputMode
+
+  // Choose what the built-in console overlay does.
   consoleMode?: ConsoleMode
+
+  // Set Kitty keyboard protocol flags, or null to disable them.
   useKittyKeyboard?: KittyKeyboardOptions | null
+
+  // Fill the render buffer with this background color. Default transparent.
   backgroundColor?: ColorInput
+
+  // Open the console overlay on uncaught errors. Defaults to true in development.
   openConsoleOnError?: boolean
+
+  // Run these input handlers before the built-in handlers.
   prependInputHandlers?: ((sequence: string) => boolean)[]
+
+  // Cap the stdin parser buffer size in bytes. Defaults to 64 MB.
   stdinParserMaxBufferBytes?: number
+
+  // Use a custom clock for timers and tests.
   clock?: Clock
+
+  // Run after destroy() finishes cleanup.
   onDestroy?: () => void
 }
 
+// Controls how the renderer uses terminal space:
+//
+// - "alternate-screen": Use the terminal's alternate screen buffer.
+//
+// - "main-screen": Render on the main screen.
+//
+// - "split-footer": Keep the renderer in a reserved footer on the main screen.
 export type ScreenMode = "alternate-screen" | "main-screen" | "split-footer"
 
+// Controls writes that go through the configured `stdout.write`.
+//
+// - "capture-stdout": Queue stdout and replay it above the split footer.
+//   Only valid with "split-footer".
+//
+// - "passthrough": Leave stdout alone.
 export type ExternalOutputMode = "capture-stdout" | "passthrough"
 
+// Controls the built-in console overlay:
+//
+// - "console-overlay": Capture `console.*` output and show the overlay.
+//
+// - "disabled": Hide the overlay. `OTUI_USE_CONSOLE` controls global console
+//   capture.
 export type ConsoleMode = "console-overlay" | "disabled"
 
 export type PixelResolution = {
